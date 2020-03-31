@@ -23,7 +23,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              59
+#define APP_ID              66
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -87,7 +87,7 @@ const uint8_t _usDSTEnd[22]   = { 3, 1, 7, 6, 5, 3, 2, 1, 7, 5, 4, 3, 2, 7, 6, 5
 SparkFun_AS3935 lightning;
 SHT1x sht1x(dataPin, clockPin);
 
-STARTUP(WiFi.selectAntenna(ANT_INTERNAL));
+STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));
 
 int currentTimeZone()
 {
@@ -174,7 +174,7 @@ void returnTunables()
     char buffer[512];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device", msg.trim(), 1);
+    client.publish("weather/event/tunables", msg.trim(), 0);
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) 
@@ -247,13 +247,14 @@ int setMaskValue(String v)
     g_maskValue = lightning.readMaskDisturber();
 
     StaticJsonDocument<200> json;
-    json["device"]["name"] = "AS3935";
-    json["device"]["attribute"]["disturbers"] = g_maskValue;
+    json["disturbers"]["update"] = g_maskValue;
+    json["disturbers"]["timestamp"] = Time.local();
+    json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device/change", msg.trim(), 0);
+    client.publish("weather/event/disturber", msg.trim(), 0);
 
     return g_maskValue;
 }
@@ -266,13 +267,14 @@ int setSpikeRejectionValue(String v)
     g_spikeRejection = reject;
 
     StaticJsonDocument<200> json;
-    json["device"]["name"] = "AS3935";
-    json["device"]["attribute"]["spikereject"] = g_spikeRejection;
+    json["spikereject"]["update"] = g_noiseFloor;
+    json["spikereject"]["timestamp"] = Time.local();
+    json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device/change", msg.trim(), 0);
+    client.publish("weather/event/spikereject", msg.trim(), 0);
 
     return reject;
 }
@@ -285,19 +287,22 @@ int setNoiseFloorValue(String v)
     g_noiseFloor = lightning.readNoiseLevel();
 
     StaticJsonDocument<200> json;
-    json["device"]["name"] = "AS3935";
-    json["device"]["attribute"]["noisefloor"] = g_noiseFloor;
+    json["noisefloor"]["update"] = g_noiseFloor;
+    json["noisefloor"]["timestamp"] = Time.local();
+    json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device/change", msg.trim(), 0);
+    client.publish("weather/event/noisefloor", msg.trim(), 0);
 
     return g_noiseFloor;
 }
 
 int setIndoor(String v)
 {
+    StaticJsonDocument<200> json;
+
     if (v == "0")
         lightning.setIndoorOutdoor(OUTDOOR);
     else
@@ -307,22 +312,23 @@ int setIndoor(String v)
     int enviVal = lightning.readIndoorOutdoor();
  
     if(enviVal == INDOOR) {
+        json["indoor"]["update"] = "indoor";
         g_indoor = true;
     }  
     else if( enviVal == OUTDOOR ) {
+        json["indoor"]["update"] = "outdoor";
         g_indoor = false;
     }  
     else 
         Serial.println(enviVal, BIN); 
     
-    StaticJsonDocument<200> json;
-    json["device"]["name"] = "AS3935";
-    json["device"]["attribute"]["indoor"] = g_indoor;
+    json["indoor"]["timestamp"] = Time.local();
+    json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device/change", msg.trim(), 0);
+    client.publish("weather/event/indoor", msg.trim(), 0);
 
     return g_indoor;
 }
@@ -349,7 +355,11 @@ void applicationSetup()
     // The lightning detector defaults to an indoor setting (less
     // gain/sensitivity), if you plan on using this outdoors 
     // uncomment the following line:
-    lightning.setIndoorOutdoor(g_indoor); 
+    if (g_indoor)
+        lightning.setIndoorOutdoor(INDOOR);
+    else
+        lightning.setIndoorOutdoor(OUTDOOR);
+
     delay(g_delay);
     int enviVal = lightning.readIndoorOutdoor();
     Serial.print("Are we set for indoor or outdoor: ");  
@@ -415,7 +425,7 @@ void applicationSetup()
     char buffer[201];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/device", msg.trim(), 1);
+    client.publish("weather/event/setup", msg.trim(), 0);
 }
 
 bool startupLightningDetector()
@@ -550,18 +560,18 @@ void setup()
     json["time"]["now"] = Time.local();
     json["network"]["ssid"] = WiFi.SSID();
     if (g_lastCalibration) {
-        json["device"]["AS3935"]["startup"] = "calibrated";
+        json["device"]["AS3935"] = "calibrated";
     }
     else
     {
-        json["device"]["AS3935"]["startup"] = "notcalibrated";
+        json["device"]["AS3935"] = "notcalibrated";
     }
     
 
     char buffer[251];
     serializeJson(json, buffer);
     String msg(buffer);
-    client.publish("weather/startup", msg.trim(), 1);
+    client.publish("weather/event/startup", msg.trim(), 0);
     applicationSetup();
 }
 
@@ -577,13 +587,14 @@ void loop()
             lightning.setNoiseLevel(++g_noiseFloor);
 
             StaticJsonDocument<200> json;
-            json["device"]["name"] = "AS3935";
-            json["device"]["attribute"]["noisefloor"] = g_noiseFloor;
+            json["noisefloor"]["update"] = g_noiseFloor;
+            json["noisefloor"]["timestamp"] = Time.local();
+            json["noisefloor"]["appid"] = g_appid;
 
             char buffer[201];
             serializeJson(json, buffer);
             String msg(buffer);
-            client.publish("weather/device/change", msg.trim(), 0);
+            client.publish("weather/event/noisefloor", msg.trim(), 0);
         }
     }
 
@@ -596,13 +607,14 @@ void loop()
         g_lastTimeFix = millis();
         Time.zone(currentTimeZone());
         StaticJsonDocument<200> json;
-        json["time"]["now"] = Time.now();
+        json["time"]["local"] = Time.local();
         json["time"]["timezone"] = currentTimeZone();
+        json["noisefloor"]["appid"] = g_appid;
 
         char buffer[201];
         serializeJson(json, buffer);
         String msg(buffer);
-        client.publish("weather/timestamp", msg.trim(), 0);
+        client.publish("weather/event/timestamp", msg.trim(), 0);
     }
 
     /*
@@ -645,13 +657,14 @@ void loop()
             lightning.setNoiseLevel(g_noiseFloor);
             
             StaticJsonDocument<200> json;
-            json["device"]["name"] = "AS3935";
-            json["device"]["attribute"]["noisefloor"] = g_noiseFloor;
+            json["noisefloor"]["update"] = g_noiseFloor;
+            json["noisefloor"]["timestamp"] = Time.local();
+            json["noisefloor"]["appid"] = g_appid;
 
             char buffer[201];
             serializeJson(json, buffer);
             String msg(buffer);
-            client.publish("weather/device/change", msg.trim(), 0);
+            client.publish("weather/event/noisefloor", msg.trim(), 0);
         }
     }
 
@@ -674,12 +687,13 @@ void loop()
 
             g_lastEventTime = Time.timeStr();
             StaticJsonDocument<100> json;
-            json["event"]["lightning"]["distance"] = g_lastDistance;
-            json["event"]["lightning"]["timestamp"] = Time.local();
+            json["lightning"]["distance"] = g_lastDistance;
+            json["lightning"]["timestamp"] = Time.local();
+            json["lightning"]["appid"] = g_appid;
             char buffer[101];
             serializeJson(json, buffer);
             String msg(buffer);
-            client.publish("weather/lightning", msg.trim(), 0);
+            client.publish("weather/event/lightning", msg.trim(), 0);
         }
     }
 
@@ -694,6 +708,7 @@ void loop()
         json["environment"]["celsius"] = g_tempc;
         json["environment"]["farenheit"] = g_tempf;
         json["environment"]["humidity"] = g_humidity;
+        json["appid"] = g_appid;
         json["time"] = Time.now();
 
         char buffer[201];
