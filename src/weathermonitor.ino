@@ -20,6 +20,8 @@
 #include <MQTT.h>
 #include <ArduinoJson.h>
 #include <SparkFun_AS3935_Lightning_Detector_Arduino_Library.h>
+#include <Adafruit_MQTT_SPARK.h>
+#include <Adafruit_MQTT.h>
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
@@ -47,6 +49,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define CST_OFFSET          -6
 #define DST_OFFSET          (CST_OFFSET + 1)
 #define TIME_BASE_YEAR		2019
+#define AIO_SERVER          "io.adafruit.com"
+#define AIO_SERVERPORT      8883                   // use 8883 for SSL
+#define AIO_USERNAME        "pbuelow"
+#define AIO_KEY             "aio_ssWA63JdXijHZF83QTUP7bNMx6US"
 
 // Chip select for SPI on pin ten.
 double g_tempc;
@@ -61,6 +67,7 @@ int g_threshold;
 int g_connected;
 int g_timeZone;
 int g_delay;
+int g_envCount;
 bool g_indoor;
 bool g_lastCalibration;
 int g_lastDistance;
@@ -86,6 +93,17 @@ const uint8_t _usDSTEnd[22]   = { 3, 1, 7, 6, 5, 3, 2, 1, 7, 5, 4, 3, 2, 7, 6, 5
 // SPI
 SparkFun_AS3935 lightning;
 SHT1x sht1x(dataPin, clockPin);
+
+/************ Global State (you don't need to change this!) ******************/
+TCPClient TheClient;
+
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
+Adafruit_MQTT_SPARK aioClient(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+/****************************** Feeds ***************************************/
+Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.lightning");
+Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.temperature");
+Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.humidity");
 
 STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));
 
@@ -179,13 +197,6 @@ void returnTunables()
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) 
 {
-    /*
-    if (length != 0) {
-        char p[length + 1];
-        memcpy(p, payload, length);
-        p[length + 1] = '\0';
-    }
-    */
     String msg(topic);
 
     Serial.print("Got message on topic ");
@@ -331,6 +342,70 @@ int setIndoor(String v)
     client.publish("weather/event/indoor", msg.trim(), 0);
 
     return g_indoor;
+}
+
+void readLightning()
+{
+    // Hardware has alerted us to an event, now we read the interrupt register
+    // to see exactly what it is. 
+    int intVal = lightning.readInterruptReg();
+    if (intVal == NOISE_INT) {
+        g_noiseCount++;
+        g_lastNoiseEvent = millis();
+    }
+    else if (intVal == LIGHTNING_INT) {
+        // Lightning! Now how far away is it? Distance estimation takes into
+        // account previously seen events. 
+        g_lastDistance = lightning.distanceToStorm(); 
+
+        // "Lightning Energy" and I do place into quotes intentionally, is a pure
+        // number that does not have any physical meaning. 
+        g_lastEnergy = lightning.lightningEnergy(); 
+
+        g_lastEventTime = Time.timeStr();
+        StaticJsonDocument<100> json;
+        json["lightning"]["distance"] = g_lastDistance;
+        json["lightning"]["timestamp"] = Time.local();
+        json["lightning"]["appid"] = g_appid;
+        char buffer[101];
+        serializeJson(json, buffer);
+        String msg(buffer);
+        client.publish("weather/event/lightning", msg.trim(), 0);
+
+        g_lightningFeed.publish(g_lastDistance);
+    }
+
+}
+
+/**
+ * Broadcast the environment every minute
+ * and every 30, send it to AIO
+ */
+void readEnvironment()
+{
+    if (millis() > (g_lastReading + ONE_MINUTE)) {
+        g_lastReading = millis();
+        // Read values from the sensor
+        g_tempc = static_cast<double>(sht1x.readTemperatureC() + CALIBRATE_C);
+        g_tempf = static_cast<double>(sht1x.readTemperatureF() + CALIBRATE_F);
+        g_humidity = static_cast<double>(sht1x.readHumidity());
+                
+        StaticJsonDocument<200> json;
+        json["environment"]["celsius"] = g_tempc;
+        json["environment"]["farenheit"] = g_tempf;
+        json["environment"]["humidity"] = g_humidity;
+        json["appid"] = g_appid;
+        json["time"] = Time.now();
+
+        char buffer[201];
+        serializeJson(json, buffer);
+        String msg(buffer);
+        client.publish("weather/conditions", msg.trim(), 0);
+        if (++g_envCount == 30) {
+            g_temperatureFeed.publish(g_tempc);
+            g_envCount = 0;
+        }
+    }
 }
 
 void applicationSetup()
@@ -518,21 +593,20 @@ void setup()
     g_watchDogValue = 2;
     g_delay = 10;
     g_lastCalibration = false;
+    g_envCount = 0;
 
     Particle.variable("appid", g_appid);
-    Particle.variable("calibrated", g_tuneValue);
+    Particle.variable("antennafreq", g_tuneValue);
     Particle.variable("noisefloor", g_noiseFloor);
-    Particle.variable("threshold", g_threshold);
     Particle.variable("distance", g_lastDistance);
-    Particle.variable("indoor", g_indoor);
     Particle.variable("conn_mqtt", g_connected);
     Particle.variable("last_event", g_lastEventTime);
     Particle.variable("humidity", g_humidity);
     Particle.variable("farenheit", g_tempf);
+    Particle.variable("calibrated", g_lastCalibration);
     Particle.function("setmask", setMaskValue);
     Particle.function("setspike", setSpikeRejectionValue);
     Particle.function("setnoise", setNoiseFloorValue);
-    Particle.function("setindoor", setIndoor);
 
     Serial.begin(115200);
 
@@ -669,51 +743,7 @@ void loop()
     }
 
     if (digitalRead(INTERRUPT_PIN) == HIGH) {
-        // Hardware has alerted us to an event, now we read the interrupt register
-        // to see exactly what it is. 
-        int intVal = lightning.readInterruptReg();
-        if (intVal == NOISE_INT) {
-            g_noiseCount++;
-            g_lastNoiseEvent = millis();
-        }
-        else if (intVal == LIGHTNING_INT) {
-            // Lightning! Now how far away is it? Distance estimation takes into
-            // account previously seen events. 
-            g_lastDistance = lightning.distanceToStorm(); 
-
-            // "Lightning Energy" and I do place into quotes intentionally, is a pure
-            // number that does not have any physical meaning. 
-            g_lastEnergy = lightning.lightningEnergy(); 
-
-            g_lastEventTime = Time.timeStr();
-            StaticJsonDocument<100> json;
-            json["lightning"]["distance"] = g_lastDistance;
-            json["lightning"]["timestamp"] = Time.local();
-            json["lightning"]["appid"] = g_appid;
-            char buffer[101];
-            serializeJson(json, buffer);
-            String msg(buffer);
-            client.publish("weather/event/lightning", msg.trim(), 0);
-        }
     }
 
-    if (millis() > (g_lastReading + ONE_MINUTE)) {
-        g_lastReading = millis();
-        // Read values from the sensor
-        g_tempc = static_cast<double>(sht1x.readTemperatureC() + CALIBRATE_C);
-        g_tempf = static_cast<double>(sht1x.readTemperatureF() + CALIBRATE_F);
-        g_humidity = static_cast<double>(sht1x.readHumidity());
-            
-        StaticJsonDocument<200> json;
-        json["environment"]["celsius"] = g_tempc;
-        json["environment"]["farenheit"] = g_tempf;
-        json["environment"]["humidity"] = g_humidity;
-        json["appid"] = g_appid;
-        json["time"] = Time.now();
-
-        char buffer[201];
-        serializeJson(json, buffer);
-        String msg(buffer);
-        client.publish("weather/conditions", msg.trim(), 0);
-    }
+    readEnvironment();
 }
