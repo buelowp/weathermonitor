@@ -1,0 +1,4 @@
+.vscode
+*.cpp
+/lib
+/target
