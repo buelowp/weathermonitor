@@ -25,7 +25,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              77
+#define APP_ID              79
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -72,6 +72,7 @@ int g_delay;
 int g_envCount;
 bool g_indoor;
 bool g_lastCalibration;
+bool g_published;
 int g_lastDistance;
 long g_lastEnergy;
 int g_tuneValue;
@@ -418,16 +419,13 @@ void readEnvironment()
         json["appid"] = g_appid;
         json["time"] = Time.now();
 
-        // Send AIO data once every 30 minutes
-        if (g_envCount == 0) {
+        if ((Time.minute() == 0 || Time.minute() == 30) && !g_published) {
             g_temperatureFeed.publish(g_tempf);
             g_humidityFeed.publish(g_humidity);
-        }
-        else if (g_envCount == 30) {
-            g_envCount = 0;
+            g_published = true;
         }
         else {
-            g_envCount++;
+            g_published = false;
         }
         char buffer[201];
         serializeJson(json, buffer);
@@ -623,7 +621,7 @@ void setup()
     g_lastCalibration = false;
     g_lastSystemUpdate = millis();
     g_envCount = 0;
-    g_recentUploadCount = 0;
+    g_published = false;
 
     Particle.variable("appid", g_appid);
     Particle.variable("antennafreq", g_tuneValue);
