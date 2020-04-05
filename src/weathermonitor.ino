@@ -25,7 +25,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              66
+#define APP_ID              77
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -44,15 +44,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define ONE_SECOND          1000
 #define FIVE_SECONDS        (5 * ONE_SECOND)
 #define ONE_MINUTE          (60 * ONE_SECOND)
+#define FIVE_MINUTES        (5 * ONE_MINUTE)
+#define FIFTEEN_MINUTES     (15 * ONE_MINUTE)
 #define ONE_HOUR            (60 * ONE_MINUTE)
 #define SIX_HOURS           (6 * ONE_HOUR)
 #define CST_OFFSET          -6
 #define DST_OFFSET          (CST_OFFSET + 1)
 #define TIME_BASE_YEAR		2019
 #define AIO_SERVER          "io.adafruit.com"
-#define AIO_SERVERPORT      8883                   // use 8883 for SSL
-#define AIO_USERNAME        "pbuelow"
-#define AIO_KEY             "aio_ssWA63JdXijHZF83QTUP7bNMx6US"
+#define AIO_SERVERPORT      1883                   // use 8883 for SSL
+#define AIO_USERNAME        ""
+#define AIO_KEY             ""
 
 // Chip select for SPI on pin ten.
 double g_tempc;
@@ -72,14 +74,17 @@ bool g_indoor;
 bool g_lastCalibration;
 int g_lastDistance;
 long g_lastEnergy;
-unsigned long g_lastTimeFix;
-byte g_watchDogValue;
 int g_tuneValue;
-unsigned long g_lastMillis;
-unsigned long g_lastLoop;
-unsigned long g_lastNoiseEvent;
-unsigned long g_lastReading;
-int g_noiseFloor = 2;
+int g_noiseFloor;
+int g_recentUploadCount;
+byte g_watchDogValue;
+system_tick_t g_lastSystemUpdate;
+system_tick_t g_lastTimeFix;
+system_tick_t g_lastMillis;
+system_tick_t g_lastLoop;
+system_tick_t g_lastNoiseEvent;
+system_tick_t g_lastReading;
+system_tick_t g_rateLimit;
 String g_lastEventTime;
 String g_name = "weathermonitor-";
 String g_mqttName = g_name + System.deviceID().substring(0, 8);
@@ -98,12 +103,12 @@ SHT1x sht1x(dataPin, clockPin);
 TCPClient TheClient;
 
 // Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
-Adafruit_MQTT_SPARK aioClient(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+Adafruit_MQTT_SPARK aioClient(&TheClient, AIO_SERVER, AIO_SERVERPORT, g_mqttName.c_str(), AIO_USERNAME, AIO_KEY);
 
 /****************************** Feeds ***************************************/
-Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.lightning");
-Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.temperature");
-Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "pbuelow/feeds/weather.humidity");
+Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.lightning");
+Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.temperature");
+Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.humidity");
 
 STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));
 
@@ -184,7 +189,6 @@ void returnTunables()
     json["time"]["timezone"] = Time.zone();
     json["time"]["now"] = Time.local();
     json["network"]["ssid"] = WiFi.SSID();
-//    json["device"]["AS3935"]["startup"] = g_lastCalibration;
     json["photon"]["id"] = System.deviceID();
     json["photon"]["version"] = System.version();
     json["photon"]["appid"] = g_appid;
@@ -344,6 +348,24 @@ int setIndoor(String v)
     return g_indoor;
 }
 
+void sendSystemData(bool force)
+{
+    if ((millis() > (g_lastSystemUpdate + FIVE_MINUTES)) || force) {
+        StaticJsonDocument<250> json;
+        json["network"]["ssid"] = WiFi.SSID();
+        json["network"]["signalquality"] = (int8_t) WiFi.RSSI();
+        json["photon"]["freemem"] = System.freeMemory();
+        json["photon"]["uptime"] = System.uptime();
+        json["photon"]["appid"] = g_appid;
+
+        char buffer[251];
+        serializeJson(json, buffer);
+        String msg(buffer);
+        client.publish("weather/event/system", msg.trim(), 0);
+        g_lastSystemUpdate = millis();
+    }
+}
+
 void readLightning()
 {
     // Hardware has alerted us to an event, now we read the interrupt register
@@ -374,7 +396,6 @@ void readLightning()
 
         g_lightningFeed.publish(g_lastDistance);
     }
-
 }
 
 /**
@@ -397,14 +418,21 @@ void readEnvironment()
         json["appid"] = g_appid;
         json["time"] = Time.now();
 
+        // Send AIO data once every 30 minutes
+        if (g_envCount == 0) {
+            g_temperatureFeed.publish(g_tempf);
+            g_humidityFeed.publish(g_humidity);
+        }
+        else if (g_envCount == 30) {
+            g_envCount = 0;
+        }
+        else {
+            g_envCount++;
+        }
         char buffer[201];
         serializeJson(json, buffer);
         String msg(buffer);
         client.publish("weather/conditions", msg.trim(), 0);
-        if (++g_envCount == 30) {
-            g_temperatureFeed.publish(g_tempc);
-            g_envCount = 0;
-        }
     }
 }
 
@@ -593,7 +621,9 @@ void setup()
     g_watchDogValue = 2;
     g_delay = 10;
     g_lastCalibration = false;
+    g_lastSystemUpdate = millis();
     g_envCount = 0;
+    g_recentUploadCount = 0;
 
     Particle.variable("appid", g_appid);
     Particle.variable("antennafreq", g_tuneValue);
@@ -632,7 +662,6 @@ void setup()
     Time.zone(currentTimeZone());
     json["time"]["timezone"] = Time.zone();
     json["time"]["now"] = Time.local();
-    json["network"]["ssid"] = WiFi.SSID();
     if (g_lastCalibration) {
         json["device"]["AS3935"] = "calibrated";
     }
@@ -641,12 +670,12 @@ void setup()
         json["device"]["AS3935"] = "notcalibrated";
     }
     
-
     char buffer[251];
     serializeJson(json, buffer);
     String msg(buffer);
     client.publish("weather/event/startup", msg.trim(), 0);
     applicationSetup();
+    sendSystemData(true);
 }
 
 void loop() 
@@ -697,6 +726,8 @@ void loop()
     if (client.isConnected()) {
         if (millis() > (g_lastLoop + FIVE_SECONDS)) {
             client.loop();
+            if (!aioClient.ping())
+                aioClient.Update();
             g_lastLoop = millis();
         }   
     }
@@ -743,7 +774,9 @@ void loop()
     }
 
     if (digitalRead(INTERRUPT_PIN) == HIGH) {
+        readLightning();
     }
 
     readEnvironment();
+    sendSystemData(false);
 }
