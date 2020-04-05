@@ -25,7 +25,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              79
+#define APP_ID              84
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -198,18 +198,6 @@ void returnTunables()
     serializeJson(json, buffer);
     String msg(buffer);
     client.publish("weather/event/tunables", msg.trim(), 0);
-}
-
-void mqttCallback(char* topic, byte* payload, unsigned int length) 
-{
-    String msg(topic);
-
-    Serial.print("Got message on topic ");
-    Serial.println(msg);
-
-    if (msg == g_tunablesMessage) {
-        returnTunables();
-    }
 }
 
 void as3935Interrupt()
@@ -598,12 +586,30 @@ bool startupLightningDetector()
     return rval;
 }
 
+void mqttCallback(char* topic, byte* payload, unsigned int length) 
+{
+    String msg(topic);
+
+    Serial.print("Got message on topic ");
+    Serial.println(msg);
+
+    if (msg == g_tunablesMessage) {
+        returnTunables();
+    }
+    else if (msg == "weather/request/status") {
+        sendSystemData(true);
+    }
+    else {
+        return;
+    }
+}
+
 void setup()
 {
     g_appid = APP_ID;
     g_count = 0;
     g_noiseCount = 0;
-    g_noiseFloor = 1;
+    g_noiseFloor = 0;
     g_spikeRejection = 8;
     g_threshold = 5;
     g_watchDogValue = 2;
@@ -612,7 +618,6 @@ void setup()
     g_connected = 0;
     g_lastLoop = 0;
     g_lastDistance = 0;
-    g_noiseFloor = 0;
     g_tuneValue = 0;
     g_lastNoiseEvent = 0;
     g_lastReading = 0;
