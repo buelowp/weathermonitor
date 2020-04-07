@@ -14,6 +14,8 @@
   License: This code is public domain but you buy me a beer if you use this and we meet someday (Beerware license).
 */
 
+#include <cmath>
+
 #include <SPI.h>
 #include <Wire.h>
 #include <SHT1x.h>
@@ -25,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              84
+#define APP_ID              88
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -346,6 +348,8 @@ void sendSystemData(bool force)
         json["photon"]["freemem"] = System.freeMemory();
         json["photon"]["uptime"] = System.uptime();
         json["photon"]["appid"] = g_appid;
+        json["photon"]["version"] = System.version();
+        json["device"]["noisefloor"] = g_noiseFloor;
 
         char buffer[251];
         serializeJson(json, buffer);
@@ -375,7 +379,8 @@ void readLightning()
 
         g_lastEventTime = Time.timeStr();
         StaticJsonDocument<100> json;
-        json["lightning"]["distance"] = g_lastDistance;
+        json["lightning"]["kilometers"] = g_lastDistance;
+        json["lightning"]["miles"] = g_lastDistance * .621371;
         json["lightning"]["timestamp"] = Time.local();
         json["lightning"]["appid"] = g_appid;
         char buffer[101];
@@ -383,7 +388,7 @@ void readLightning()
         String msg(buffer);
         client.publish("weather/event/lightning", msg.trim(), 0);
 
-        g_lightningFeed.publish(g_lastDistance);
+        g_lightningFeed.publish((g_lastDistance * .621371));
     }
 }
 
@@ -399,11 +404,16 @@ void readEnvironment()
         g_tempc = static_cast<double>(sht1x.readTemperatureC() + CALIBRATE_C);
         g_tempf = static_cast<double>(sht1x.readTemperatureF() + CALIBRATE_F);
         g_humidity = static_cast<double>(sht1x.readHumidity());
-                
+        
+        //Tdf= ((((Tf-32)/1.8)-(14.55+0.114*((Tf-32)/1.8))*(1-(0.01*RH))-((2.5+0.007*((Tf-32)/1.8))*(1-(0.01*RH)))^3-(15.9+0.117*((Tf-32)/1.8))*(1-(0.01*RH))^14)*1.8)+32
+        double tdpfc =  (g_tempc - (14.55 + 0.114 * g_tempc) * (1 - (0.01 * g_humidity)) - pow(((2.5 + 0.007 * g_tempc) * (1 - (0.01 * g_humidity))),3) - (15.9 + 0.117 * g_tempc) * pow((1 - (0.01 * g_humidity)), 14));
+        double tdpff = tdpfc * 1.8 + 32;
         StaticJsonDocument<200> json;
         json["environment"]["celsius"] = g_tempc;
         json["environment"]["farenheit"] = g_tempf;
         json["environment"]["humidity"] = g_humidity;
+        json["environment"]["dewpointc"] = tdpfc;
+        json["environment"]["dewpointf"] = tdpff;
         json["appid"] = g_appid;
         json["time"] = Time.now();
 
@@ -695,7 +705,7 @@ void loop()
             StaticJsonDocument<200> json;
             json["noisefloor"]["update"] = g_noiseFloor;
             json["noisefloor"]["timestamp"] = Time.local();
-            json["noisefloor"]["appid"] = g_appid;
+            json["photon"]["appid"] = g_appid;
 
             char buffer[201];
             serializeJson(json, buffer);
@@ -715,7 +725,7 @@ void loop()
         StaticJsonDocument<200> json;
         json["time"]["local"] = Time.local();
         json["time"]["timezone"] = currentTimeZone();
-        json["noisefloor"]["appid"] = g_appid;
+        json["photon"]["appid"] = g_appid;
 
         char buffer[201];
         serializeJson(json, buffer);
@@ -767,7 +777,7 @@ void loop()
             StaticJsonDocument<200> json;
             json["noisefloor"]["update"] = g_noiseFloor;
             json["noisefloor"]["timestamp"] = Time.local();
-            json["noisefloor"]["appid"] = g_appid;
+            json["photon"]["appid"] = g_appid;
 
             char buffer[201];
             serializeJson(json, buffer);
