@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              88
+#define APP_ID              89
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -112,6 +112,8 @@ Adafruit_MQTT_SPARK aioClient(&TheClient, AIO_SERVER, AIO_SERVERPORT, g_mqttName
 Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.lightning");
 Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.temperature");
 Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.humidity");
+
+ApplicationWatchdog wd(60000, System.reset);
 
 STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));
 
