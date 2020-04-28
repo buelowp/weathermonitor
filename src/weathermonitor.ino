@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              89
+#define APP_ID              92
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -50,6 +50,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define FIFTEEN_MINUTES     (15 * ONE_MINUTE)
 #define ONE_HOUR            (60 * ONE_MINUTE)
 #define SIX_HOURS           (6 * ONE_HOUR)
+#define ONE_DAY             (24 * ONE_HOUR)
+#define FIVE_DAYS           (5 * ONE_DAY)
 #define CST_OFFSET          -6
 #define DST_OFFSET          (CST_OFFSET + 1)
 #define TIME_BASE_YEAR		2019
@@ -176,24 +178,8 @@ void returnTunables()
     Serial.println(g_noiseFloor);
     json["device"]["AS3935"]["noisefloor"] = g_noiseFloor;
 
-    g_watchDogValue = lightning.readWatchdogThreshold();
-    Serial.print("Watchdog Threshold is set to: ");
-    Serial.println(g_watchDogValue);
-    json["device"]["AS3935"]["watchdog"] = g_watchDogValue;
-    
-    g_spikeRejection = lightning.readSpikeRejection();
-    Serial.print("Spike Rejection is set to: ");
-    Serial.println(g_spikeRejection);
-    json["device"]["AS3935"]["spikereject"] = g_spikeRejection;
-
-    g_threshold = lightning.readLightningThreshold();
-    Serial.print("The number of strikes before interrupt is triggerd: "); 
-    json["device"]["AS3935"]["threshold"] = g_threshold;
-    Serial.println(g_threshold);
-
     json["time"]["timezone"] = Time.zone();
     json["time"]["now"] = Time.local();
-    json["network"]["ssid"] = WiFi.SSID();
     json["photon"]["id"] = System.deviceID();
     json["photon"]["version"] = System.version();
     json["photon"]["appid"] = g_appid;
@@ -598,6 +584,20 @@ bool startupLightningDetector()
     return rval;
 }
 
+void handleDeviceRequest(byte *payload, unsigned int length)
+{
+    StaticJsonDocument<256> doc;
+    deserializeJson(doc, payload, length);
+    
+    if (!doc.isNull()) {
+        if (doc["device"]["id"] == System.deviceID()) {
+            if (doc["device"]["command"] == "reboot") {
+                System.reset();
+            }
+        }
+    }
+}
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) 
 {
     String msg(topic);
@@ -610,6 +610,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
     }
     else if (msg == "weather/request/status") {
         sendSystemData(true);
+    }
+    else if (msg == "device/request") {
+        handleDeviceRequest(payload, length);
     }
     else {
         return;
@@ -695,6 +698,10 @@ void setup()
 
 void loop() 
 {
+    if (System.uptime() == (FIVE_DAYS / 1000)) {
+        System.reset();
+    }
+
     /*
      * If the number of noise events in a one minute period is more than max
      * bump the noise floor up one and see if it stabilizes
