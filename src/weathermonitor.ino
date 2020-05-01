@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              92
+#define APP_ID              93
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -90,7 +90,6 @@ system_tick_t g_lastLoop;
 system_tick_t g_lastNoiseEvent;
 system_tick_t g_lastReading;
 system_tick_t g_rateLimit;
-String g_lastEventTime;
 String g_name = "weathermonitor-";
 String g_mqttName = g_name + System.deviceID().substring(0, 8);
 String g_tunablesMessage = "weather/request/tunables";
@@ -185,9 +184,9 @@ void returnTunables()
     json["photon"]["appid"] = g_appid;
         
     char buffer[512];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/tunables", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+
+    client.publish("weather/event/tunables", buffer, len);
 }
 
 void as3935Interrupt()
@@ -246,9 +245,8 @@ int setMaskValue(String v)
     json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/disturber", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/disturber", buffer, len);
 
     return g_maskValue;
 }
@@ -266,9 +264,8 @@ int setSpikeRejectionValue(String v)
     json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/spikereject", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/spikereject", buffer, len);
 
     return reject;
 }
@@ -286,9 +283,8 @@ int setNoiseFloorValue(String v)
     json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/noisefloor", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/noisefloor", buffer, len);
 
     return g_noiseFloor;
 }
@@ -320,9 +316,8 @@ int setIndoor(String v)
     json["noisefloor"]["appid"] = g_appid;
 
     char buffer[201];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/indoor", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/indoor", buffer, len);
 
     return g_indoor;
 }
@@ -340,9 +335,8 @@ void sendSystemData(bool force)
         json["device"]["noisefloor"] = g_noiseFloor;
 
         char buffer[251];
-        serializeJson(json, buffer);
-        String msg(buffer);
-        client.publish("weather/event/system", msg.trim(), 0);
+        size_t len = serializeJson(json, buffer);
+        client.publish("weather/event/system", buffer, len);
         g_lastSystemUpdate = millis();
     }
 }
@@ -365,16 +359,14 @@ void readLightning()
         // number that does not have any physical meaning. 
         g_lastEnergy = lightning.lightningEnergy(); 
 
-        g_lastEventTime = Time.timeStr();
         StaticJsonDocument<100> json;
         json["lightning"]["kilometers"] = g_lastDistance;
         json["lightning"]["miles"] = g_lastDistance * .621371;
         json["lightning"]["timestamp"] = Time.local();
         json["lightning"]["appid"] = g_appid;
         char buffer[101];
-        serializeJson(json, buffer);
-        String msg(buffer);
-        client.publish("weather/event/lightning", msg.trim(), 0);
+        size_t len = serializeJson(json, buffer);
+        client.publish("weather/event/lightning", buffer, len);
 
         g_lightningFeed.publish((g_lastDistance * .621371));
     }
@@ -414,9 +406,8 @@ void readEnvironment()
             g_published = false;
         }
         char buffer[201];
-        serializeJson(json, buffer);
-        String msg(buffer);
-        client.publish("weather/conditions", msg.trim(), 0);
+        size_t len = serializeJson(json, buffer);
+        client.publish("weather/conditions", buffer, len);
     }
 }
 
@@ -510,9 +501,8 @@ void applicationSetup()
     Serial.println(g_threshold);
         
     char buffer[201];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/setup", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/setup", buffer, len);
 }
 
 bool startupLightningDetector()
@@ -600,18 +590,16 @@ void handleDeviceRequest(byte *payload, unsigned int length)
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) 
 {
-    String msg(topic);
-
     Serial.print("Got message on topic ");
-    Serial.println(msg);
+    Serial.println(topic);
 
-    if (msg == g_tunablesMessage) {
+    if (strcmp(topic, "weather/request/tunables") == 0) {
         returnTunables();
     }
-    else if (msg == "weather/request/status") {
+    else if (strcmp(topic, "weather/request/status") == 0) {
         sendSystemData(true);
     }
-    else if (msg == "device/request") {
+    else if (strcmp(topic, "device/request") == 0) {
         handleDeviceRequest(payload, length);
     }
     else {
@@ -648,7 +636,6 @@ void setup()
     Particle.variable("noisefloor", g_noiseFloor);
     Particle.variable("distance", g_lastDistance);
     Particle.variable("conn_mqtt", g_connected);
-    Particle.variable("last_event", g_lastEventTime);
     Particle.variable("humidity", g_humidity);
     Particle.variable("farenheit", g_tempf);
     Particle.variable("calibrated", g_lastCalibration);
@@ -689,9 +676,8 @@ void setup()
     }
     
     char buffer[251];
-    serializeJson(json, buffer);
-    String msg(buffer);
-    client.publish("weather/event/startup", msg.trim(), 0);
+    size_t len = serializeJson(json, buffer);
+    client.publish("weather/event/startup", buffer, len);
     applicationSetup();
     sendSystemData(true);
 }
@@ -701,7 +687,7 @@ void loop()
     if (System.uptime() == (FIVE_DAYS / 1000)) {
         System.reset();
     }
-
+    
     /*
      * If the number of noise events in a one minute period is more than max
      * bump the noise floor up one and see if it stabilizes
@@ -717,9 +703,9 @@ void loop()
             json["photon"]["appid"] = g_appid;
 
             char buffer[201];
-            serializeJson(json, buffer);
-            String msg(buffer);
-            client.publish("weather/event/noisefloor", msg.trim(), 0);
+            size_t len = serializeJson(json, buffer);
+            
+            client.publish("weather/event/noisefloor", buffer, len);
         }
     }
 
@@ -737,9 +723,9 @@ void loop()
         json["photon"]["appid"] = g_appid;
 
         char buffer[201];
-        serializeJson(json, buffer);
-        String msg(buffer);
-        client.publish("weather/event/timestamp", msg.trim(), 0);
+        size_t len = serializeJson(json, buffer);
+        
+        client.publish("weather/event/timestamp", buffer, len);
     }
 
     /*
@@ -789,9 +775,9 @@ void loop()
             json["photon"]["appid"] = g_appid;
 
             char buffer[201];
-            serializeJson(json, buffer);
-            String msg(buffer);
-            client.publish("weather/event/noisefloor", msg.trim(), 0);
+            size_t len = serializeJson(json, buffer);
+            
+            client.publish("weather/event/noisefloor", buffer, len);
         }
     }
 
