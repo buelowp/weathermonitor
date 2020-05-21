@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              98
+#define APP_ID              99
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -58,8 +58,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define TIME_BASE_YEAR		2019
 #define AIO_SERVER          "io.adafruit.com"
 #define AIO_SERVERPORT      1883                   // use 8883 for SSL
-#define AIO_USERNAME        "pbuelow"
-#define AIO_KEY             "aio_ksPF94IJFYdla3QKXZPW2iKaiGX5"
+#define AIO_USERNAME        ""
+#define AIO_KEY             ""
 #define TOTAL_RAIN_ADDR     4
 #define DAY_RAIN_ADDR       8
 
