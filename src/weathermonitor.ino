@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              99
+#define APP_ID              103
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -61,7 +61,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define AIO_USERNAME        ""
 #define AIO_KEY             ""
 #define TOTAL_RAIN_ADDR     4
-#define DAY_RAIN_ADDR       8
+#define DAY_RAIN_ADDR       (TOTAL_RAIN_ADDR + sizeof(uint32_t))
 
 // Chip select for SPI on pin ten.
 double g_tempc;
@@ -77,14 +77,14 @@ int g_connected;
 int g_timeZone;
 int g_delay;
 int g_envCount;
-bool g_rainNotCleared;
+bool g_rainCleared;
 bool g_indoor;
 bool g_lastCalibration;
 bool g_published;
 int g_lastDistance;
 long g_lastEnergy;
-uint16_t g_rainTickToday;
-uint16_t g_rainTickTotal;
+uint32_t g_rainTickToday;
+uint32_t g_rainTickTotal;
 int g_tuneValue;
 int g_noiseFloor;
 int g_recentUploadCount;
@@ -121,6 +121,7 @@ Adafruit_MQTT_SPARK aioClient(&TheClient, AIO_SERVER, AIO_SERVERPORT, g_mqttName
 Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.lightning");
 Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.temperature");
 Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.humidity");
+Adafruit_MQTT_Publish g_rainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.rainfall");
 
 ApplicationWatchdog wd(60000, System.reset);
 
@@ -631,6 +632,20 @@ void updateRainTick()
     }
 }
 
+int setTotalRainFall(String total)
+{
+    g_rainTickTotal = total.toInt();
+    EEPROM.put(TOTAL_RAIN_ADDR, g_rainTickTotal);
+    return g_rainTickTotal;
+}
+
+int setDayRainFall(String total)
+{
+    g_rainTickToday = total.toInt();
+    EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
+    return g_rainTickToday;
+}
+
 void setup()
 {
     g_appid = APP_ID;
@@ -657,29 +672,31 @@ void setup()
     g_rainTickTotal = 0;
     g_rainTickToday = 0;
     g_lastTickEvent = 0;
-    g_rainNotCleared = false;
+    g_rainCleared = true;
 
     Particle.variable("appid", g_appid);
-    Particle.variable("antennafreq", g_tuneValue);
-    Particle.variable("noisefloor", g_noiseFloor);
+
     Particle.variable("distance", g_lastDistance);
     Particle.variable("conn_mqtt", g_connected);
     Particle.variable("humidity", g_humidity);
     Particle.variable("farenheit", g_tempf);
     Particle.variable("calibrated", g_lastCalibration);
-    Particle.variable("ticks", g_rainTickToday);
+    Particle.variable("today", g_rainTickToday);
+    Particle.variable("total", g_rainTickTotal);
     Particle.function("setmask", setMaskValue);
     Particle.function("setspike", setSpikeRejectionValue);
     Particle.function("setnoise", setNoiseFloorValue);
+    Particle.function("setrain", setTotalRainFall);
+    Particle.function("settoday", setDayRainFall);
 
     Serial.begin(115200);
 
     EEPROM.get(DAY_RAIN_ADDR, g_rainTickToday);
-    if (g_rainTickToday == 0xFFFF)
+    if (g_rainTickToday == 0xFFFFFFFF)
         g_rainTickToday = 0;
 
     EEPROM.get(TOTAL_RAIN_ADDR, g_rainTickTotal);
-    if (g_rainTickTotal == 0xFFFF)
+    if (g_rainTickTotal == 0xFFFFFFFF)
         g_rainTickTotal = 0;
 
     pinMode(D7, OUTPUT);
@@ -727,13 +744,15 @@ void loop()
     char mqttBuffer[512];
 
     if ((Time.hour() == 0) && (Time.minute() == 0)) {
-        if (g_rainNotCleared) {
+        if (!g_rainCleared) {
+            g_rainFallFeed.publish(g_rainTickToday * .01);
             g_rainTickToday = 0;
-            g_rainNotCleared = false;
+            g_rainCleared = true;
+            EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
         }
     }
     else {
-        g_rainNotCleared = true;
+        g_rainCleared = false;
     }
 
     if (System.uptime() == (FIVE_DAYS / 1000)) {
