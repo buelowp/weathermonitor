@@ -27,7 +27,7 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              103
+#define APP_ID              107
 
 #define dataPin             D2         // Yellow       // Brown is power, black is ground
 #define clockPin            D3         // Blue
@@ -78,6 +78,7 @@ int g_timeZone;
 int g_delay;
 int g_envCount;
 bool g_rainCleared;
+bool g_hourlyRainCleared;
 bool g_indoor;
 bool g_lastCalibration;
 bool g_published;
@@ -85,6 +86,7 @@ int g_lastDistance;
 long g_lastEnergy;
 uint32_t g_rainTickToday;
 uint32_t g_rainTickTotal;
+uint32_t g_rainTickLastHour;
 int g_tuneValue;
 int g_noiseFloor;
 int g_recentUploadCount;
@@ -122,6 +124,8 @@ Adafruit_MQTT_Publish g_lightningFeed = Adafruit_MQTT_Publish(&aioClient, AIO_US
 Adafruit_MQTT_Publish g_temperatureFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.temperature");
 Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.humidity");
 Adafruit_MQTT_Publish g_rainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.rainfall");
+Adafruit_MQTT_Publish g_hourlyRainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.hourlyrainfall");
+Adafruit_MQTT_Publish g_totalRainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.total-rainfall");
 
 ApplicationWatchdog wd(60000, System.reset);
 
@@ -395,7 +399,6 @@ void readEnvironment()
         g_tempf = static_cast<double>(sht1x.readTemperatureF() + CALIBRATE_F);
         g_humidity = static_cast<double>(sht1x.readHumidity());
         
-        //Tdf= ((((Tf-32)/1.8)-(14.55+0.114*((Tf-32)/1.8))*(1-(0.01*RH))-((2.5+0.007*((Tf-32)/1.8))*(1-(0.01*RH)))^3-(15.9+0.117*((Tf-32)/1.8))*(1-(0.01*RH))^14)*1.8)+32
         double tdpfc =  (g_tempc - (14.55 + 0.114 * g_tempc) * (1 - (0.01 * g_humidity)) - pow(((2.5 + 0.007 * g_tempc) * (1 - (0.01 * g_humidity))),3) - (15.9 + 0.117 * g_tempc) * pow((1 - (0.01 * g_humidity)), 14));
         double tdpff = tdpfc * 1.8 + 32;
         StaticJsonDocument<200> json;
@@ -404,6 +407,7 @@ void readEnvironment()
         json["environment"]["humidity"] = g_humidity;
         json["environment"]["dewpointc"] = tdpfc;
         json["environment"]["dewpointf"] = tdpff;
+        json["environment"]["hourlyrain"] = g_rainTickLastHour;
         json["environment"]["raintoday"] = g_rainTickToday;
         json["environment"]["raintotal"] = g_rainTickTotal;
         json["appid"] = g_appid;
@@ -628,6 +632,7 @@ void updateRainTick()
     if ((g_lastTickEvent + 250) <= millis()) {
         g_rainTickToday++;
         g_rainTickTotal++;
+        g_rainTickLastHour++;
         g_lastTickEvent = millis();
     }
 }
@@ -673,6 +678,8 @@ void setup()
     g_rainTickToday = 0;
     g_lastTickEvent = 0;
     g_rainCleared = true;
+    g_hourlyRainCleared = true;
+    g_rainTickLastHour = 0;
 
     Particle.variable("appid", g_appid);
 
@@ -743,19 +750,28 @@ void loop()
 {
     char mqttBuffer[512];
 
-    if ((Time.hour() == 0) && (Time.minute() == 0)) {
-        if (!g_rainCleared) {
+    if (Time.minute() == 0) {
+        if (!g_rainCleared && Time.hour() == 0) {
             g_rainFallFeed.publish(g_rainTickToday * .01);
             g_rainTickToday = 0;
             g_rainCleared = true;
             EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
         }
+        if (!g_hourlyRainCleared) {
+            g_hourlyRainFallFeed.publish(g_rainTickLastHour * .01);
+            g_totalRainFallFeed.publish(g_rainTickTotal * .01);
+            g_rainTickLastHour = 0;
+            g_hourlyRainCleared = true;
+        }
     }
     else {
         g_rainCleared = false;
+        g_hourlyRainCleared = false;
     }
 
     if (System.uptime() == (FIVE_DAYS / 1000)) {
+        EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
+        EEPROM.put(TOTAL_RAIN_ADDR, g_rainTickTotal);
         System.reset();
     }
     
