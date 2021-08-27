@@ -18,7 +18,9 @@
 
 #include <SPI.h>
 #include <Wire.h>
-#include <SHT1x.h>
+#include <SHT30.h>
+#include <Adafruit_VEML7700.h>
+#include <Adafruit_VEML6070.h>
 #include <MQTT.h>
 #include <ArduinoJson.h>
 #include <SparkFun_AS3935_Lightning_Detector_Arduino_Library.h>
@@ -27,10 +29,8 @@
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
-#define APP_ID              107
+#define APP_ID              108
 
-#define dataPin             D2         // Yellow       // Brown is power, black is ground
-#define clockPin            D3         // Blue
 #define TIPGUAGE_PIN        D6          // Rain Tipguage (might use D4)
 #define CALIBRATE_F         0
 #define CALIBRATE_C         0
@@ -82,6 +82,9 @@ bool g_hourlyRainCleared;
 bool g_indoor;
 bool g_lastCalibration;
 bool g_published;
+bool g_getLightningData;
+float g_lux;
+uint16_t g_uv;
 int g_lastDistance;
 long g_lastEnergy;
 uint32_t g_rainTickToday;
@@ -111,7 +114,9 @@ const uint8_t _usDSTEnd[22]   = { 3, 1, 7, 6, 5, 3, 2, 1, 7, 5, 4, 3, 2, 7, 6, 5
 
 // SPI
 SparkFun_AS3935 lightning;
-SHT1x sht1x(dataPin, clockPin);
+SHT30 sensor;
+Adafruit_VEML6070 uv = Adafruit_VEML6070();
+Adafruit_VEML7700 veml;
 
 /************ Global State (you don't need to change this!) ******************/
 TCPClient TheClient;
@@ -126,6 +131,8 @@ Adafruit_MQTT_Publish g_humidityFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USE
 Adafruit_MQTT_Publish g_rainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.rainfall");
 Adafruit_MQTT_Publish g_hourlyRainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.hourlyrainfall");
 Adafruit_MQTT_Publish g_totalRainFallFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.total-rainfall");
+Adafruit_MQTT_Publish g_luxFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.lux");
+Adafruit_MQTT_Publish g_uvFeed = Adafruit_MQTT_Publish(&aioClient, AIO_USERNAME "/feeds/weather.uvindex");
 
 ApplicationWatchdog wd(60000, System.reset);
 
@@ -155,17 +162,22 @@ int currentTimeZone()
 
 void returnTunables()
 {
-    StaticJsonDocument<500> json;
- 
+    memset(mqttBuffer, '\0', 512);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("device");
+        json.beginObject();
+        json.name("AS3935");
+
     g_maskValue = lightning.readMaskDisturber();
     Serial.print("Are disturbers being masked: "); 
     if (g_maskValue == 1) {
         Serial.println("YES");
-        json["device"]["AS3935"]["disturbers"] = "MASKED";
+        json.name("disturbers").value("MASKED");
     } 
     else if (g_maskValue == 0) {
         Serial.println("NO"); 
-        json["device"]["AS3935"]["disturbers"] = "UNMASKED";
+        json.name("disturbers").value("UNMASKED");
     }
 
     int enviVal = lightning.readIndoorOutdoor();
@@ -173,33 +185,38 @@ void returnTunables()
     if(enviVal == INDOOR) {
         Serial.println("Indoor.");
         g_indoor = true;
-        json["device"]["AS3935"]["indoor"] = "TRUE";
+        json.name("indoor").value("TRUE");
     }  
     else if( enviVal == OUTDOOR ) {
         Serial.println("Outdoor.");
         g_indoor = false;
-        json["device"]["AS3935"]["indoor"] = "FALSE";
+        json.name("indoor").value("FALSE");
     }  
     else { 
         Serial.println(enviVal, BIN);
-        json["device"]["AS3935"]["indoor"] = "ERROR";
+        json.name("indoor").value("ERROR");
     }
 
     g_noiseFloor = lightning.readNoiseLevel();
     Serial.print("Noise Level is set at: ");
     Serial.println(g_noiseFloor);
-    json["device"]["AS3935"]["noisefloor"] = g_noiseFloor;
-
-    json["time"]["timezone"] = Time.zone();
-    json["time"]["now"] = Time.local();
-    json["photon"]["id"] = System.deviceID();
-    json["photon"]["version"] = System.version();
-    json["photon"]["appid"] = g_appid;
+    json.name("noisefloor").value(g_noiseFloor);
+    json.endObject();
+    json.name("time");
+    json.beginObject();
+        json.name("timezone").value(Time.zone());
+        json.name("now").value(Time.timeStr());
+    json.endObject();
+    json.name("photon");
+    json.beginObject();
+        json.name("appid").value(g_appid);
+        json.name("version").value(System.version());
+        json.name("appid").value(g_appid);
+    json.endObject();
+    json.endObject();
         
-    memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-
-    client.publish("weather/event/tunables", mqttBuffer);
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/tunables", json.buffer());
 }
 
 void as3935Interrupt()
@@ -252,14 +269,16 @@ int setMaskValue(String v)
     delay(g_delay);
     g_maskValue = lightning.readMaskDisturber();
 
-    StaticJsonDocument<200> json;
-    json["disturbers"]["update"] = g_maskValue;
-    json["disturbers"]["timestamp"] = Time.local();
-    json["noisefloor"]["appid"] = g_appid;
-
     memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/disturber", mqttBuffer);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("disturbers").value(g_maskValue);
+    json.name("timestamp").value(Time.timeStr());
+    json.name("appid").value(g_appid);
+    json.endObject();
+
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/disturber", json.buffer());
 
     return g_maskValue;
 }
@@ -271,14 +290,19 @@ int setSpikeRejectionValue(String v)
     delay(g_delay);
     g_spikeRejection = reject;
 
-    StaticJsonDocument<200> json;
-    json["spikereject"]["update"] = g_noiseFloor;
-    json["spikereject"]["timestamp"] = Time.local();
-    json["noisefloor"]["appid"] = g_appid;
-
     memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/spikereject", mqttBuffer);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("spikereject");
+    json.beginObject();
+        json.name("update").value(g_noiseFloor);
+    json.endObject();
+    json.name("timestamp").value(Time.timeStr());
+    json.name("appid").value(g_appid);
+    json.endObject();
+
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/spikereject", json.buffer());
 
     return reject;
 }
@@ -290,21 +314,30 @@ int setNoiseFloorValue(String v)
     delay(g_delay);
     g_noiseFloor = lightning.readNoiseLevel();
 
-    StaticJsonDocument<200> json;
-    json["noisefloor"]["update"] = g_noiseFloor;
-    json["noisefloor"]["timestamp"] = Time.local();
-    json["noisefloor"]["appid"] = g_appid;
-
     memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/noisefloor", mqttBuffer);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("noisefloor");
+    json.beginObject();
+        json.name("update").value(g_noiseFloor);
+        json.name("timestamp").value(Time.timeStr());
+        json.name("appid").value(g_appid);
+    json.endObject();
+    json.endObject();
+
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/noisefloor", json.buffer());
 
     return g_noiseFloor;
 }
 
 int setIndoor(String v)
 {
-    StaticJsonDocument<200> json;
+    memset(mqttBuffer, '\0', 512);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("location");
+    json.beginObject();
 
     if (v == "0")
         lightning.setIndoorOutdoor(OUTDOOR);
@@ -315,22 +348,23 @@ int setIndoor(String v)
     int enviVal = lightning.readIndoorOutdoor();
  
     if(enviVal == INDOOR) {
-        json["indoor"]["update"] = "indoor";
+        json.name("update").value("indoor");
         g_indoor = true;
     }  
     else if( enviVal == OUTDOOR ) {
-        json["indoor"]["update"] = "outdoor";
+        json.name("update").value("outdoor");
         g_indoor = false;
     }  
     else 
         Serial.println(enviVal, BIN); 
     
-    json["indoor"]["timestamp"] = Time.local();
-    json["noisefloor"]["appid"] = g_appid;
+    json.endObject();
+    json.name("timestamp").value(Time.timeStr());
+    json.name("appid").value(g_appid);
+    json.endObject();
 
-    memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/indoor", mqttBuffer);
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/indoor", json.buffer());
 
     return g_indoor;
 }
@@ -338,26 +372,39 @@ int setIndoor(String v)
 void sendSystemData(bool force)
 {
     if ((millis() > (g_lastSystemUpdate + FIVE_MINUTES)) || force) {
-        StaticJsonDocument<250> json;
-        json["network"]["ssid"] = WiFi.SSID();
-        json["network"]["signalquality"] = (int8_t) WiFi.RSSI();
-        json["photon"]["freemem"] = System.freeMemory();
-        json["photon"]["uptime"] = System.uptime();
-        json["photon"]["appid"] = g_appid;
-        json["photon"]["version"] = System.version();
-        json["device"]["noisefloor"] = g_noiseFloor;
-
         memset(mqttBuffer, '\0', 512);
-        serializeJson(json, mqttBuffer);
-        client.publish("weather/event/system", mqttBuffer);
+        JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+        json.beginObject();
+            json.name("network");
+            json.beginObject();
+                json.name("ssid").value(WiFi.SSID());
+                json.name("signalquality").value((int8_t)WiFi.RSSI());
+            json.endObject();
+            json.name("photon");
+            json.beginObject();
+                json.name("freemem").value(System.freeMemory());
+                json.name("uptime").value(System.uptime());
+                json.name("appid").value(g_appid);
+                json.name("version").value(System.version());
+            json.endObject();
+            json.name("AS3935");
+            json.beginObject();
+                json.name("noisefloor").value(g_noiseFloor);
+            json.endObject();
+        json.endObject();
+        json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+        client.publish("weather/event/system", json.buffer());
         g_lastSystemUpdate = millis();
     }
 }
 
 void readLightning()
 {
+    // We got notified, make sure we reset this so if a notification comes in again, we get it while in this function
+    g_getLightningData = false;
+
     // Hardware has alerted us to an event, now we read the interrupt register
-    // to see exactly what it is. 
+    // to see exactly what it is.     
     int intVal = lightning.readInterruptReg();
     if (intVal == NOISE_INT) {
         g_noiseCount++;
@@ -372,17 +419,29 @@ void readLightning()
         // number that does not have any physical meaning. 
         g_lastEnergy = lightning.lightningEnergy(); 
 
-        StaticJsonDocument<100> json;
-        json["lightning"]["kilometers"] = g_lastDistance;
-        json["lightning"]["miles"] = g_lastDistance * .621371;
-        json["lightning"]["timestamp"] = Time.local();
-        json["lightning"]["appid"] = g_appid;
-
         memset(mqttBuffer, '\0', 512);
-        serializeJson(json, mqttBuffer);
-        client.publish("weather/event/lightning", mqttBuffer);
+        JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+        json.beginObject();
+            json.name("appid").value(g_appid);
+            json.name("timestamp").value(Time.local());
+            json.name("lightning");
+            json.beginObject();
+                json.name("kilometers").value(g_lastDistance);
+                json.name("miles").value(g_lastDistance * .621371);
+            json.endObject();
+        json.endObject();
+        json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+        client.publish("weather/event/lightning", json.buffer());
 
+        while (!aioClient.connected()) {
+            Log.warn("Not connected, trying to connect...");
+            if (aioClient.connectServer())
+                break;
+
+            delay(100);
+        }
         g_lightningFeed.publish((g_lastDistance * .621371));
+        aioClient.disconnectServer();
     }
 }
 
@@ -395,47 +454,79 @@ void readEnvironment()
     if (millis() > (g_lastReading + ONE_MINUTE)) {
         g_lastReading = millis();
         // Read values from the sensor
-        g_tempc = static_cast<double>(sht1x.readTemperatureC() + CALIBRATE_C);
-        g_tempf = static_cast<double>(sht1x.readTemperatureF() + CALIBRATE_F);
-        g_humidity = static_cast<double>(sht1x.readHumidity());
+        if(sensor.update()) {
+            g_tempc = sensor.humidity;
+            g_tempf = g_tempc * 1.8 + 32;
+            g_humidity = sensor.humidity;
+            g_lux = veml.readLux();
+            g_uv = uv.readUV();
+        }
+        else {
+            Log.error("Unable to read from SHT20");
+            return;
+        }
         
         double tdpfc =  (g_tempc - (14.55 + 0.114 * g_tempc) * (1 - (0.01 * g_humidity)) - pow(((2.5 + 0.007 * g_tempc) * (1 - (0.01 * g_humidity))),3) - (15.9 + 0.117 * g_tempc) * pow((1 - (0.01 * g_humidity)), 14));
         double tdpff = tdpfc * 1.8 + 32;
-        StaticJsonDocument<200> json;
-        json["environment"]["celsius"] = g_tempc;
-        json["environment"]["farenheit"] = g_tempf;
-        json["environment"]["humidity"] = g_humidity;
-        json["environment"]["dewpointc"] = tdpfc;
-        json["environment"]["dewpointf"] = tdpff;
-        json["environment"]["hourlyrain"] = g_rainTickLastHour;
-        json["environment"]["raintoday"] = g_rainTickToday;
-        json["environment"]["raintotal"] = g_rainTickTotal;
-        json["appid"] = g_appid;
-        json["time"] = Time.now();
+        memset(mqttBuffer, '\0', 512);
+        JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+        json.beginObject();
+            json.name("appid").value(g_appid);
+            json.name("timestamp").value(Time.local());
+            json.name("environment");
+            json.beginObject();
+                json.name("celsius").value(g_tempc);
+                json.name("farenheit").value(g_tempf);
+                json.name("humidity").value(g_humidity);
+                json.name("dewpointc").value(tdpfc);
+                json.name("dewpointf").value(tdpff);
+                json.name("hourlyrain").value(g_rainTickLastHour);
+                json.name("railtoday").value(g_rainTickToday);
+                json.name("raintotal").value(g_rainTickTotal);
+                json.name("lux").value(g_lux);
+                json.name("uv").value(g_uv);
+            json.endObject();
+        json.endObject();
 
         EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
         EEPROM.put(TOTAL_RAIN_ADDR, g_rainTickTotal);
 
+        json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+        client.publish("weather/conditions", json.buffer());
+
         if ((Time.minute() == 0 || Time.minute() == 30) && !g_published) {
+            while (!aioClient.connected()) {
+                Log.warn("Not connected, trying to connect...");
+                if (aioClient.connectServer())
+                    break;
+
+                delay(100);
+            }
+            
             g_temperatureFeed.publish(g_tempf);
             g_humidityFeed.publish(g_humidity);
+            g_uvFeed.publish(g_uv);
+            g_luxFeed.publish(g_lux);
             g_published = true;
         }
         else {
             g_published = false;
         }
-
-        memset(mqttBuffer, '\0', 512);
-        serializeJson(json, mqttBuffer);
-        client.publish("weather/conditions", mqttBuffer);
     }
 }
 
 void applicationSetup()
 {
-    StaticJsonDocument<200> json;
- 
-    json["device"]["name"] = "AS3935";
+    memset(mqttBuffer, '\0', 512);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+        json.name("device");
+        json.beginObject();
+            json.name("name").value("AS3935");
+
+            json.name("AS3935");
+                json.beginObject();
+                json.name("calibrated").value(g_lastCalibration);
 
     lightning.maskDisturber(true); 
     delay(g_delay);
@@ -443,11 +534,11 @@ void applicationSetup()
     Serial.print("Are disturbers being masked: "); 
     if (g_maskValue == 1) {
         Serial.println("YES");
-        json["device"]["AS3935"]["disturbers"] = "MASKED";
+                json.name("disturbers").value("MASKED");
     } 
     else if (g_maskValue == 0) {
         Serial.println("NO"); 
-        json["device"]["AS3935"]["disturbers"] = "UNMASKED";
+                json.name("disturbers").value("UNMASKED");
     }
 
     // The lightning detector defaults to an indoor setting (less
@@ -464,16 +555,16 @@ void applicationSetup()
     if(enviVal == INDOOR) {
         Serial.println("Indoor.");
         g_indoor = true;
-        json["device"]["AS3935"]["indoor"] = "TRUE";
+                json.name("indoor").value("TRUE");
     }  
     else if( enviVal == OUTDOOR ) {
         Serial.println("Outdoor.");
         g_indoor = false;
-        json["device"]["AS3935"]["indoor"] = "FALSE";
+                json.name("indoor").value("FALSE");
     }  
     else { 
         Serial.println(enviVal, BIN);
-        json["device"]["AS3935"]["indoor"] = "ERROR";
+                json.name("indoor").value("ERROR");
     }
 
     // Noise floor setting from 1-7, one being the lowest. Default setting is
@@ -484,7 +575,7 @@ void applicationSetup()
     g_noiseFloor = lightning.readNoiseLevel();
     Serial.print("Noise Level is set at: ");
     Serial.println(g_noiseFloor);
-    json["device"]["AS3935"]["noisefloor"] = g_noiseFloor;
+            json.name("noisefloor").value(g_noiseFloor);
 
     // Watchdog threshold setting can be from 1-10, one being the lowest. Default setting is
     // two. If you need to check the setting, the corresponding function for
@@ -494,7 +585,7 @@ void applicationSetup()
     g_watchDogValue = lightning.readWatchdogThreshold();
     Serial.print("Watchdog Threshold is set to: ");
     Serial.println(g_watchDogValue);
-    json["device"]["AS3935"]["watchdog"] = g_watchDogValue;
+            json.name("watchdog").value(g_watchDogValue);
     
     // Spike Rejection setting from 1-11, one being the lowest. Default setting is
     // two. If you need to check the setting, the corresponding function for
@@ -507,7 +598,7 @@ void applicationSetup()
     g_spikeRejection = lightning.readSpikeRejection();
     Serial.print("Spike Rejection is set to: ");
     Serial.println(g_spikeRejection);
-    json["device"]["AS3935"]["spikereject"] = g_spikeRejection;
+            json.name("spikereject").value(g_spikeRejection);
 
     // This setting will change when the lightning detector issues an interrupt.
     // For example you will only get an interrupt after five lightning strikes
@@ -516,13 +607,18 @@ void applicationSetup()
     lightning.lightningThreshold(g_threshold); 
     delay(g_delay);
     g_threshold = lightning.readLightningThreshold();
-    Serial.print("The number of strikes before interrupt is triggerd: "); 
-    json["device"]["AS3935"]["threshold"] = g_threshold;
+    Serial.print("The number of strikes before interrupt is triggerd: ");
+            json.name("threshold").value(g_threshold);
+            json.endObject();   // AS3935
+        json.endObject();       // device
+        json.name("appid").value(g_appid);
+        json.name("timestamp").value(Time.timeStr());
+    json.endObject();
+
     Serial.println(g_threshold);
         
-    memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/setup", mqttBuffer);
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/setup", json.buffer());
 }
 
 bool startupLightningDetector()
@@ -596,16 +692,6 @@ bool startupLightningDetector()
 
 void handleDeviceRequest(byte *payload, unsigned int length)
 {
-    StaticJsonDocument<256> doc;
-    deserializeJson(doc, payload, length);
-    
-    if (!doc.isNull()) {
-        if (doc["device"]["id"] == System.deviceID()) {
-            if (doc["device"]["command"] == "reboot") {
-                System.reset();
-            }
-        }
-    }
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) 
@@ -649,6 +735,11 @@ int setDayRainFall(String total)
     g_rainTickToday = total.toInt();
     EEPROM.put(DAY_RAIN_ADDR, g_rainTickToday);
     return g_rainTickToday;
+}
+
+void updateLightning()
+{
+    g_getLightningData = true;
 }
 
 void setup()
@@ -711,13 +802,28 @@ void setup()
 
     delay(2000);        // Give our devices a bit of time to stabilize
 
-    attachInterrupt(TIPGUAGE_PIN, updateRainTick, CHANGE);
+    uv.begin(VEML6070_1_T);
+    veml.begin();
+    veml.setGain(VEML7700_GAIN_1);
+    veml.setIntegrationTime(VEML7700_IT_800MS);
 
-    StaticJsonDocument<250> json;
-    json["photon"]["id"] = System.deviceID();
-    json["photon"]["version"] = System.version();
-    json["photon"]["appid"] = g_appid;
-    json["reset"]["reason"] = System.resetReason();
+    attachInterrupt(TIPGUAGE_PIN, updateRainTick, CHANGE);
+    attachInterrupt(INTERRUPT_PIN, updateLightning, RISING);
+    g_getLightningData = false;
+
+    memset(mqttBuffer, '\0', 512);
+    JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+    json.beginObject();
+    json.name("photon");
+        json.beginObject();
+        json.name("deviceid").value(System.deviceID());
+        json.name("version").value(System.version());
+        json.name("appid").value(g_appid);
+        json.endObject();
+    json.name("reset");
+        json.beginObject();
+        json.name("reason").value(System.resetReason());
+        json.endObject();
 
     client.connect(g_mqttName.c_str());
     if (client.isConnected()) {
@@ -729,19 +835,17 @@ void setup()
     g_lastCalibration = startupLightningDetector();
 
     Time.zone(currentTimeZone());
-    json["time"]["timezone"] = Time.zone();
-    json["time"]["now"] = Time.local();
-    if (g_lastCalibration) {
-        json["device"]["AS3935"] = "calibrated";
-    }
-    else
-    {
-        json["device"]["AS3935"] = "notcalibrated";
-    }
+    json.name("time");
+        json.beginObject();
+        json.name("timezone").value(Time.zone());
+        json.name("timestamp").value(Time.timeStr());
+        json.endObject();
+    json.endObject();
     
-    memset(mqttBuffer, '\0', 512);
-    serializeJson(json, mqttBuffer);
-    client.publish("weather/event/startup", mqttBuffer);
+    sensor.setAddress(0);
+
+    json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+    client.publish("weather/event/startup", json.buffer());
     applicationSetup();
     sendSystemData(true);
 }
@@ -784,15 +888,16 @@ void loop()
             g_noiseCount = 0;
             lightning.setNoiseLevel(++g_noiseFloor);
 
-            StaticJsonDocument<200> json;
-            json["noisefloor"]["update"] = g_noiseFloor;
-            json["noisefloor"]["timestamp"] = Time.local();
-            json["photon"]["appid"] = g_appid;
-
             memset(mqttBuffer, '\0', 512);
-            serializeJson(json, mqttBuffer);
-            
-            client.publish("weather/event/noisefloor", mqttBuffer);
+            JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+            json.beginObject();
+                json.name("noisefloor").value(g_noiseFloor);
+                json.name("timestamp").value(Time.timeStr());
+                json.name("appid").value(g_appid);
+            json.endObject();
+
+            json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+            client.publish("weather/event/noisefloor", json.buffer());
         }
     }
 
@@ -804,14 +909,6 @@ void loop()
         Particle.syncTime();
         g_lastTimeFix = millis();
         Time.zone(currentTimeZone());
-        StaticJsonDocument<200> json;
-        json["time"]["local"] = Time.local();
-        json["time"]["timezone"] = currentTimeZone();
-        json["photon"]["appid"] = g_appid;
-
-        memset(mqttBuffer, '\0', 512);
-        serializeJson(json, mqttBuffer);
-        client.publish("weather/event/timestamp", mqttBuffer);
     }
 
     /*
@@ -820,8 +917,6 @@ void loop()
     if (client.isConnected()) {
         if (millis() > (g_lastLoop + FIVE_SECONDS)) {
             client.loop();
-            if (!aioClient.ping())
-                aioClient.Update();
             g_lastLoop = millis();
         }   
     }
@@ -851,22 +946,24 @@ void loop()
      * to reduce the noise floor.
      */
     if (millis() > (g_lastNoiseEvent + SIX_HOURS)) {
-        if (g_noiseFloor > 1) {
+        if (g_noiseFloor >= 1) {
             g_noiseFloor--;
             lightning.setNoiseLevel(g_noiseFloor);
             
-            StaticJsonDocument<200> json;
-            json["noisefloor"]["update"] = g_noiseFloor;
-            json["noisefloor"]["timestamp"] = Time.local();
-            json["photon"]["appid"] = g_appid;
-
             memset(mqttBuffer, '\0', 512);
-            serializeJson(json, mqttBuffer);
-            client.publish("weather/event/noisefloor", mqttBuffer);
+            JSONBufferWriter json(mqttBuffer, sizeof(mqttBuffer));
+            json.beginObject();
+                json.name("noisefloor").value(g_noiseFloor);
+                json.name("timestamp").value(Time.timeStr());
+                json.name("appid").value(g_appid);
+            json.endObject();
+
+            json.buffer()[std::min(json.bufferSize(), json.dataSize())] = 0;
+            client.publish("weather/event/noisefloor", json.buffer());
         }
     }
 
-    if (digitalRead(INTERRUPT_PIN) == HIGH) {
+    if (g_getLightningData) {
         readLightning();
     }
 
